@@ -67,17 +67,24 @@ class AgentState(TypedDict):
 # 2. 라우팅 함수들 (LangGraph 조건부 엣지)
 # ─────────────────────────────────────────────
 
-def route_by_intent(state: AgentState) -> Literal["planner", "executor"]:
+def route_by_intent(state: AgentState) -> Literal["planner", "executor", "finalizer"]:
     """
     Intent Gate 결과에 따라 다음 노드를 결정한다.
     oh-my-openagent의 Phase 0 → Phase 1 분기에 해당.
+
+    워크플로우 타입:
+    - plan_execute       → planner (계획 수립 후 실행)
+    - direct             → executor (바로 실행)
+    - research_only      → executor (바로 실행, 계획 없음)
+    - ask_clarification  → finalizer (명확화 요청 메시지 반환)
     """
     workflow = state.get("recommended_workflow", "direct")
 
     if workflow == "plan_execute":
-        return "planner"   # 계획 먼저
-    else:
-        return "executor"  # 바로 실행
+        return "planner"
+    if workflow == "ask_clarification":
+        return "finalizer"   # 명확화 메시지를 final_answer로 바로 반환
+    return "executor"
 
 
 def check_execution_result(state: AgentState) -> Literal["reviewer", "executor", "finalizer"]:
@@ -171,20 +178,48 @@ async def intent_gate_node(state: AgentState) -> dict:
     """
     Phase 0: Intent Gate
     의도를 분류하고 워크플로우를 결정한다.
+
+    chat_history를 AgentState.messages에서 추출해 분류 문맥으로 활용.
+    UNCLEAR / ask_clarification 워크플로우이면 final_answer에 명확화 메시지를 저장.
     """
     from .intent_router import IntentRouter
 
-    router = IntentRouter()
-    decision = await router.classify(state["user_request"])
+    # 이전 대화 이력을 분류 문맥으로 전달 (마지막 6개 메시지만 — 컨텍스트 절약)
+    chat_history = list(state.get("messages", []))[-6:]
 
-    return {
+    router = IntentRouter()
+    decision = await router.classify(state["user_request"], chat_history=chat_history)
+
+    result: dict = {
         "intent": decision.intent,
         "recommended_workflow": decision.recommended_workflow,
         "workflow_trace": state.get("workflow_trace", []) + ["intent_gate"],
         "messages": [
-            AIMessage(content=f"Intent: {decision.intent} | Workflow: {decision.recommended_workflow} | {decision.reasoning}")
+            AIMessage(
+                content=(
+                    f"Intent: {decision.intent} "
+                    f"(confidence={decision.confidence:.2f}) | "
+                    f"Workflow: {decision.recommended_workflow} | "
+                    f"{decision.reasoning}"
+                )
+            )
         ],
     }
+
+    # ask_clarification: 사용자에게 되물을 메시지를 final_answer로 저장
+    # finalizer_node는 final_answer가 이미 있으면 그대로 반환함
+    if decision.recommended_workflow == "ask_clarification":
+        result["final_answer"] = (
+            f"\U0001f914 요청을 좀 더 명확히 해주시겠어요?\n\n"
+            f"**판단 이유**: {decision.reasoning}\n\n"
+            f"예시:\n"
+            f"- 구체적으로 어떤 기능을 구현하고 싶으신가요?\n"
+            f"- 어떤 오류가 발생하고 있나요? (오류 메시지 포함)\n"
+            f"- 한 번에 하나씩 요청해 주시면 더 잘 도와드릴 수 있어요."
+        )
+        result["loop_active"] = False
+
+    return result
 
 
 async def planner_node(state: AgentState) -> dict:
@@ -412,7 +447,7 @@ def build_orchestration_graph():
     graph.add_conditional_edges(
         "intent_gate",
         route_by_intent,
-        {"planner": "planner", "executor": "executor"},
+        {"planner": "planner", "executor": "executor", "finalizer": "finalizer"},
     )
 
     graph.add_edge("planner", "executor")
