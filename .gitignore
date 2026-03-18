@@ -1,0 +1,210 @@
+# ─────────────────────────────────────────────────────────────
+# My Agent System — .gitignore
+# Stack: Python · Poetry · LangChain/LangGraph · FastAPI
+#         ChromaDB · Redis · LangFuse · SQLite
+# ─────────────────────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════
+# 🔑 환경 변수 & 시크릿 (절대 커밋 금지)
+# ══════════════════════════════════════════════════════════════
+.env
+.env.local
+.env.production
+.env.staging
+.env.development
+# .env.example 은 커밋 허용 (위 패턴에 포함되지 않음)
+*.pem
+*.key
+*.p12
+secrets/
+
+
+# ══════════════════════════════════════════════════════════════
+# 🐍 Python 런타임
+# ══════════════════════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 배포 패키징
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+wheels/
+share/python-wheels/
+
+# 타입 스텁
+*.pyi  # 자동 생성된 것만 (직접 작성한 것은 제외하려면 개별 관리)
+
+
+# ══════════════════════════════════════════════════════════════
+# 📦 Poetry (의존성 관리)
+# ══════════════════════════════════════════════════════════════
+# poetry.lock은 커밋 권장 (재현 가능한 빌드)
+# poetry.lock  ← 주석 처리 = 커밋함
+
+# 가상환경 (Poetry가 프로젝트 내에 생성한 경우)
+.venv/
+venv/
+env/
+ENV/
+.virtualenv/
+
+
+# ══════════════════════════════════════════════════════════════
+# 🧪 테스트 & 코드 품질
+# ══════════════════════════════════════════════════════════════
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Ruff 캐시
+.ruff_cache/
+
+# Mypy 캐시
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pytest 임시 파일
+pytest-of-*/
+
+
+# ══════════════════════════════════════════════════════════════
+# 🗄️ 데이터베이스 & 스토리지
+# ══════════════════════════════════════════════════════════════
+
+# SQLite (LangGraph Checkpointer — HITL 세션 상태)
+*.db
+*.sqlite
+*.sqlite3
+checkpoints.db
+langgraph_checkpoints.db
+
+# ChromaDB (Episodic Memory + Tool Registry)
+chroma_db/
+chromadb/
+.chroma/
+chroma_data/
+
+# 벡터 DB 인덱스 (로컬 실험용)
+faiss_index/
+*.faiss
+*.pkl           # 직렬화된 임베딩
+
+
+# ══════════════════════════════════════════════════════════════
+# 📊 LangFuse & 관찰 가능성
+# ══════════════════════════════════════════════════════════════
+# LangFuse는 클라우드 서비스 — 로컬 로그만 제외
+langfuse_local/
+traces/
+*.trace.json
+
+
+# ══════════════════════════════════════════════════════════════
+# 🧠 AI & LLM 관련
+# ══════════════════════════════════════════════════════════════
+# 캐싱된 LLM 응답 (실험/디버깅용)
+llm_cache/
+.langchain/
+langchain_cache/
+
+# 에이전트 실행 로그 (로컬 디버깅용만)
+agent_logs/
+session_logs/
+*.agent.log
+
+# 임시 스크래치 파일
+scratch/
+experiments/
+sandbox/
+
+
+# ══════════════════════════════════════════════════════════════
+# 🌐 FastAPI & 서버
+# ══════════════════════════════════════════════════════════════
+# 업로드된 파일
+uploads/
+static/uploads/
+
+# 자동 생성 OpenAPI 스펙 (선택 — 직접 작성한 건 포함)
+# openapi.json
+
+
+# ══════════════════════════════════════════════════════════════
+# 🍎 macOS
+# ══════════════════════════════════════════════════════════════
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+
+# ══════════════════════════════════════════════════════════════
+# 💻 IDE & 에디터
+# ══════════════════════════════════════════════════════════════
+
+# VSCode (팀 공유 설정은 .vscode/settings.json에서 선택적 관리)
+.vscode/
+!.vscode/extensions.json    # 권장 익스텐션은 공유 가능
+
+# JetBrains (PyCharm 등)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.netrwhist
+
+# Emacs
+*#
+.\#*
+
+
+# ══════════════════════════════════════════════════════════════
+# 📝 문서 빌드 (MkDocs 등 사용 시)
+# ══════════════════════════════════════════════════════════════
+site/
+docs/_build/
+
+
+# ══════════════════════════════════════════════════════════════
+# 🔧 기타 도구
+# ══════════════════════════════════════════════════════════════
+# Node (MCP 서버나 프론트엔드 도구 쓸 경우)
+node_modules/
+.npm
+
+# Docker 관련 (민감한 오버라이드만)
+docker-compose.override.yml
+.docker/
+
+# Terraform (나중에 인프라 코드 추가 시)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!example.tfvars

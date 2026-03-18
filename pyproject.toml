@@ -1,0 +1,66 @@
+[tool.poetry]
+name = "my-agent-system"
+version = "0.2.0"
+description = "Multi-agent AI orchestration system inspired by oh-my-openagent"
+authors = ["cheonhyeonjun"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+# ── LangChain / LangGraph 코어 ───────────────────────────────
+langchain = "^0.3"
+langgraph = "^0.3"
+langchain-anthropic = "^0.3"
+langchain-openai = "^0.3"
+langchain-google-genai = "^2"
+langchain-community = "^0.3"
+langchain-chroma = "^0.1"         # Dynamic Tool Registry + Episodic Memory
+
+# ── API 서버 ─────────────────────────────────────────────────
+fastapi = "^0.115"
+uvicorn = {extras = ["standard"], version = "^0.32"}
+
+# ── 데이터 검증 ──────────────────────────────────────────────
+pydantic = "^2.9"
+pydantic-settings = "^2.5"
+
+# ── 유틸리티 ─────────────────────────────────────────────────
+python-dotenv = "^1.0"
+httpx = "^0.27"
+pyyaml = "^6.0"
+
+# ── 외부 도구 ────────────────────────────────────────────────
+tavily-python = "^0.5"            # 웹 검색
+
+# ── 메모리 & 저장소 ──────────────────────────────────────────
+redis = "^5"                      # 세션 저장 (Layer 2)
+chromadb = "^0.5"                 # 에피소딕 메모리 (Layer 3)
+
+# ── 관찰 가능성 (v2 신규) ────────────────────────────────────
+langfuse = "^2"                   # LLM 관찰 가능성 + 비용 추적
+
+# ── LangGraph Checkpointer (v2 신규: HITL) ───────────────────
+langgraph-checkpoint-sqlite = "^2"  # 개발용 SQLite 체크포인터
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8"
+pytest-asyncio = "^0.24"
+ruff = "^0.8"
+mypy = "^1.13"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
