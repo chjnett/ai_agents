@@ -1,36 +1,62 @@
 """
-My Agent System - MVP 엔트리포인트
-
-oh-my-openagent의 핵심 아키텍처를 Python + LangGraph로 구현한 멀티-에이전트 시스템.
-
-실행 방법:
-    python main.py            # 대화형 CLI
-    python main.py --demo     # 데모 실행
-
-필수 환경 변수 (.env 파일에 설정):
-    ANTHROPIC_API_KEY
-    OPENAI_API_KEY (선택)
-    GOOGLE_API_KEY (선택)
+My Agent System CLI entrypoint.
 """
+
+from __future__ import annotations
 
 import asyncio
 import uuid
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
-async def run_interactive():
-    """대화형 CLI 모드"""
+async def _run_graph_with_resume(graph, initial_state, config):
+    """
+    Run graph and handle interrupt/resume cycles when present.
+    Works with upcoming HITL interrupt() nodes as well.
+    """
+    from langgraph.types import Command
+
+    result = await graph.ainvoke(initial_state, config=config)
+
+    while isinstance(result, dict) and "__interrupt__" in result:
+        interrupts = result.get("__interrupt__", [])
+        if interrupts:
+            print("\n[Approval Required]")
+            for idx, item in enumerate(interrupts, start=1):
+                value = getattr(item, "value", item)
+                print(f"{idx}. {value}")
+        user_input = input("Approve / modify:<instruction> / cancel > ").strip()
+        result = await graph.ainvoke(Command(resume=user_input), config=config)
+
+    return result
+
+
+def _build_graph_with_checkpointer():
     from src.core.workflow_engine import build_orchestration_graph
 
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+    except ModuleNotFoundError:
+        print("[warn] langgraph sqlite checkpointer not available. Running without persistence.")
+        return build_orchestration_graph()
+
+    checkpointer = SqliteSaver.from_conn_string("checkpoints.db")
+    return build_orchestration_graph(checkpointer=checkpointer)
+
+
+async def run_interactive():
+    from src.core.workflow_engine import make_initial_state
+
     print("=" * 60)
-    print("  My Agent System v0.1")
-    print("  Inspired by oh-my-openagent architecture")
+    print("  My Agent System v0.2")
+    print("  Phase 1 enabled: CostGuard + Checkpointer")
     print("=" * 60)
     print("Commands: 'quit' to exit, 'help' for tips\n")
 
-    graph = build_orchestration_graph()
+    graph = _build_graph_with_checkpointer()
 
     while True:
         try:
@@ -44,103 +70,82 @@ async def run_interactive():
         if user_input.lower() in ("quit", "exit", "q"):
             print("Bye!")
             break
+
         if user_input.lower() == "help":
             print("\nTips:")
-            print("  - Ask 'how does X work' → research mode")
-            print("  - Ask 'implement X' → plan + execute mode")
-            print("  - Ask 'fix my code: <code>' → fix mode")
-            print("  - Ask 'write a report about X' → generate mode\n")
+            print("  - 'session:<id> <message>' 로 같은 세션을 재개할 수 있습니다.")
+            print("  - Ask 'how does X work' -> research mode")
+            print("  - Ask 'implement X' -> plan + execute mode")
+            print("  - Ask 'fix my code: <code>' -> fix mode\n")
             continue
 
         session_id = str(uuid.uuid4())
+        message = user_input
+        if user_input.startswith("session:"):
+            # format: session:<uuid> message...
+            try:
+                prefix, rest = user_input.split(" ", 1)
+                session_id = prefix.removeprefix("session:").strip()
+                message = rest.strip()
+            except ValueError:
+                print("형식: session:<세션ID> <메시지>")
+                continue
 
-        initial_state = {
-            "messages": [],
-            "user_request": user_input,
-            "session_id": session_id,
-            "intent": "",
-            "recommended_workflow": "direct",
-            "plan": None,
-            "acceptance_criteria": [],
-            "current_task_index": 0,
-            "completed_tasks": [],
-            "failed_tasks": [],
-            "loop_active": True,
-            "loop_iteration": 0,
-            "max_loop_iterations": 10,
-            "retry_count": 0,
-            "consecutive_failures": 0,
-            "final_answer": None,
-            "workflow_trace": [],
-        }
+        initial_state = make_initial_state(user_request=message, session_id=session_id)
+        config = {"configurable": {"thread_id": session_id}}
 
         print("\nThinking...", end="", flush=True)
-
         try:
-            final_state = await graph.ainvoke(initial_state)
+            final_state = await _run_graph_with_resume(graph, initial_state, config=config)
+            print("\r" + " " * 20 + "\r", end="")
 
-            print("\r" + " " * 20 + "\r", end="")  # "Thinking..." 지움
-
-            # 워크플로우 트레이스 출력 (어떤 에이전트를 썼는지)
-            trace = " → ".join(final_state.get("workflow_trace", []))
+            trace = " -> ".join(final_state.get("workflow_trace", []))
             if trace:
-                print(f"\n[{trace}]\n")
+                print(f"\n[{trace}]")
 
+            print(f"Session: {session_id}")
+            print(f"Cost: ${final_state.get('total_cost_usd', 0.0):.6f}")
+            print(f"Tokens: {final_state.get('total_tokens', 0)}")
             answer = final_state.get("final_answer", "No answer generated.")
-            print(f"Agent > {answer}\n")
-
+            print(f"\nAgent > {answer}\n")
         except Exception as e:
             print(f"\rError: {e}\n")
 
 
 async def run_demo():
-    """데모 모드: 미리 정의된 질문들로 시스템 테스트"""
-    from src.core.workflow_engine import build_orchestration_graph
+    from src.core.workflow_engine import make_initial_state
 
     demo_requests = [
         "How does the LangGraph StateGraph work?",
         "What is the difference between RAG and fine-tuning?",
     ]
-
-    graph = build_orchestration_graph()
-
+    graph = _build_graph_with_checkpointer()
     print("=== Demo Mode ===\n")
 
     for request in demo_requests:
+        session_id = str(uuid.uuid4())
+        initial_state = make_initial_state(
+            user_request=request,
+            session_id=session_id,
+            max_loop_iterations=5,
+        )
+        config = {"configurable": {"thread_id": session_id}}
+        final_state = await _run_graph_with_resume(graph, initial_state, config=config)
+
+        trace = " -> ".join(final_state.get("workflow_trace", []))
         print(f"Request: {request}")
-        print("-" * 40)
-
-        initial_state = {
-            "messages": [],
-            "user_request": request,
-            "session_id": str(uuid.uuid4()),
-            "intent": "",
-            "recommended_workflow": "direct",
-            "plan": None,
-            "acceptance_criteria": [],
-            "current_task_index": 0,
-            "completed_tasks": [],
-            "failed_tasks": [],
-            "loop_active": True,
-            "loop_iteration": 0,
-            "max_loop_iterations": 5,
-            "retry_count": 0,
-            "consecutive_failures": 0,
-            "final_answer": None,
-            "workflow_trace": [],
-        }
-
-        final_state = await graph.ainvoke(initial_state)
-
-        trace = " → ".join(final_state.get("workflow_trace", []))
+        print(f"Session: {session_id}")
         print(f"Workflow: {trace}")
         print(f"Intent:   {final_state.get('intent', 'unknown')}")
+        print(f"Cost:     ${final_state.get('total_cost_usd', 0.0):.6f}")
+        print(f"Tokens:   {final_state.get('total_tokens', 0)}")
         print(f"\nAnswer:\n{final_state.get('final_answer', 'No answer')}\n")
         print("=" * 60 + "\n")
 
 
 def main():
     import sys
+
     if "--demo" in sys.argv:
         asyncio.run(run_demo())
     else:

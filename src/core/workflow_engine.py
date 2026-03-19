@@ -1,12 +1,13 @@
-from typing import TypedDict, Annotated, Sequence, Literal
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langgraph.graph import StateGraph, END
+from __future__ import annotations
+
 import operator
+from typing import Annotated, Any, Literal, Sequence, TypedDict
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.graph import END, StateGraph
 
-# ─────────────────────────────────────────────
-# 1. 워크플로우 상태 (oh-my-openagent의 세션 상태에 해당)
-# ─────────────────────────────────────────────
+from .cost_guard import CostGuard
+
 
 class TaskItem(TypedDict):
     id: str
@@ -15,185 +16,203 @@ class TaskItem(TypedDict):
     agent: str
     depends_on: list[str]
     success_criteria: str
-    status: str   # "pending" | "in_progress" | "done" | "failed"
+    status: str
 
 
 class TaskResult(TypedDict):
     task_id: str
     agent: str
     result: str
-    status: str   # "success" | "failed"
+    status: str
     error: str | None
 
 
 class AgentState(TypedDict):
-    """
-    LangGraph 전체 워크플로우 상태.
-    oh-my-openagent의 세션 상태 + Ralph Loop 상태를 통합.
-    """
-    # 기본 요청 정보
+    # basic request metadata
     messages: Annotated[Sequence[BaseMessage], operator.add]
     user_request: str
     session_id: str
+    user_id: str | None
 
-    # Intent Gate 결과
-    intent: str                          # IntentType
-    recommended_workflow: str            # "plan_execute" | "direct" | "research_only"
+    # intent routing
+    intent: str
+    recommended_workflow: str
+    task_complexity: str
 
-    # Planner 결과 (Prometheus 역할)
+    # planning state
     plan: list[TaskItem] | None
+    parallel_groups: list[list[str]] | None
     acceptance_criteria: list[str]
+    require_approval: bool
 
-    # 실행 추적 (Atlas 역할)
+    # execution traces
     current_task_index: int
-    completed_tasks: list[TaskResult]
-    failed_tasks: list[TaskResult]
+    completed_tasks: Annotated[list[TaskResult], operator.add]
+    failed_tasks: Annotated[list[TaskResult], operator.add]
 
-    # Ralph Loop 상태 (oh-my-openagent 핵심)
+    # loop guard
     loop_active: bool
     loop_iteration: int
-    max_loop_iterations: int             # 기본값: 10
+    max_loop_iterations: int
 
-    # 에러 복구
+    # cost/token guard
+    total_cost_usd: float
+    total_tokens: int
+    max_cost_usd: float
+    max_tokens: int
+
+    # retry state
     retry_count: int
     consecutive_failures: int
 
-    # 최종 결과
+    # memory placeholders
+    past_episodes: list[dict] | None
+    user_preferences: dict[str, Any]
+
+    # final outputs
     final_answer: str | None
-    workflow_trace: list[str]            # 실행된 에이전트 이름 목록
+    workflow_trace: Annotated[list[str], operator.add]
 
 
-# ─────────────────────────────────────────────
-# 2. 라우팅 함수들 (LangGraph 조건부 엣지)
-# ─────────────────────────────────────────────
+def make_initial_state(
+    user_request: str,
+    session_id: str,
+    *,
+    max_loop_iterations: int = 10,
+    require_approval: bool = False,
+    user_id: str | None = None,
+    max_cost_usd: float = 1.0,
+    max_tokens: int = 500_000,
+) -> AgentState:
+    return {
+        "messages": [],
+        "user_request": user_request,
+        "session_id": session_id,
+        "user_id": user_id,
+        "intent": "",
+        "recommended_workflow": "direct",
+        "task_complexity": "medium",
+        "plan": None,
+        "parallel_groups": None,
+        "acceptance_criteria": [],
+        "require_approval": require_approval,
+        "current_task_index": 0,
+        "completed_tasks": [],
+        "failed_tasks": [],
+        "loop_active": True,
+        "loop_iteration": 0,
+        "max_loop_iterations": max_loop_iterations,
+        "total_cost_usd": 0.0,
+        "total_tokens": 0,
+        "max_cost_usd": max_cost_usd,
+        "max_tokens": max_tokens,
+        "retry_count": 0,
+        "consecutive_failures": 0,
+        "past_episodes": None,
+        "user_preferences": {},
+        "final_answer": None,
+        "workflow_trace": [],
+    }
+
 
 def route_by_intent(state: AgentState) -> Literal["planner", "executor", "finalizer"]:
-    """
-    Intent Gate 결과에 따라 다음 노드를 결정한다.
-    oh-my-openagent의 Phase 0 → Phase 1 분기에 해당.
-
-    워크플로우 타입:
-    - plan_execute       → planner (계획 수립 후 실행)
-    - direct             → executor (바로 실행)
-    - research_only      → executor (바로 실행, 계획 없음)
-    - ask_clarification  → finalizer (명확화 요청 메시지 반환)
-    """
     workflow = state.get("recommended_workflow", "direct")
-
     if workflow == "plan_execute":
         return "planner"
     if workflow == "ask_clarification":
-        return "finalizer"   # 명확화 메시지를 final_answer로 바로 반환
+        return "finalizer"
     return "executor"
 
 
 def check_execution_result(state: AgentState) -> Literal["reviewer", "executor", "finalizer"]:
-    """
-    실행 결과를 보고 다음 단계를 결정한다.
-    """
+    if not state.get("loop_active", True):
+        return "finalizer"
+
+    if state.get("total_cost_usd", 0.0) >= state.get("max_cost_usd", 1.0):
+        return "finalizer"
+    if state.get("total_tokens", 0) >= state.get("max_tokens", 500_000):
+        return "finalizer"
+
     consecutive = state.get("consecutive_failures", 0)
     retry = state.get("retry_count", 0)
-
-    # 3회 연속 실패 → Oracle(reviewer) 상담 (oh-my-openagent 패턴)
     if consecutive >= 3:
         return "reviewer"
-
-    # 재시도 한도 초과 → 강제 종료
     if retry >= 5:
         return "finalizer"
 
     completed = len(state.get("completed_tasks", []))
     plan = state.get("plan") or []
     total = len(plan)
-
-    # 모든 태스크 완료 → 리뷰
     if completed >= total and total > 0:
         return "reviewer"
-
-    # 아직 할 일 있음 → 계속 실행
     return "executor"
 
 
 def check_review_result(state: AgentState) -> Literal["loop_check", "executor", "planner"]:
-    """
-    리뷰어 평가 후 다음 단계를 결정한다.
-    """
     messages = state.get("messages", [])
     last_message = messages[-1] if messages else None
-
     if not last_message:
         return "loop_check"
 
     content = last_message.content if hasattr(last_message, "content") else ""
-
-    # 리뷰어가 재계획을 요청한 경우
-    if "replan" in content.lower() or "새로운 계획" in content:
+    low = content.lower()
+    if "replan" in low or "새로운 계획" in low:
         return "planner"
-
-    # 리뷰어가 수정을 요청한 경우
-    if "fix" in content.lower() or "need_fix" in content.lower():
+    if "fix" in low or "need_fix" in low:
         return "executor"
-
-    # 기본: Loop 판단으로 이동
     return "loop_check"
 
 
 def should_continue_loop(state: AgentState) -> Literal["executor", "finalizer"]:
-    """
-    Ralph Loop 판단 함수.
-    oh-my-openagent의 loop-state-controller.ts를 Python으로 구현.
-
-    "완료 조건을 달성했는가?" 를 판단하고:
-    - 아직 할 일이 있으면 → 계속 실행
-    - 모두 완료되었으면 → 종료
-    """
     iteration = state.get("loop_iteration", 0)
     max_iter = state.get("max_loop_iterations", 10)
-
-    # 최대 반복 횟수 초과
     if iteration >= max_iter:
         return "finalizer"
-
-    # Loop가 비활성 상태
     if not state.get("loop_active", True):
+        return "finalizer"
+
+    if state.get("total_cost_usd", 0.0) >= state.get("max_cost_usd", 1.0):
+        return "finalizer"
+    if state.get("total_tokens", 0) >= state.get("max_tokens", 500_000):
         return "finalizer"
 
     plan = state.get("plan") or []
     completed = len(state.get("completed_tasks", []))
-    total = len(plan)
-
-    # 아직 완료 안 된 태스크가 있음
-    if completed < total:
+    if completed < len(plan):
         return "executor"
-
-    # 모든 태스크 완료 → 최종 답변 준비
     return "finalizer"
 
 
-# ─────────────────────────────────────────────
-# 3. 노드 함수들 (각 에이전트의 실행 로직)
-# ─────────────────────────────────────────────
+def _extract_token_usage(response: BaseMessage) -> tuple[int, int]:
+    """Best-effort token extraction across providers."""
+    usage = getattr(response, "usage_metadata", None) or {}
+    in_tokens = int(usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0) or 0)
+    out_tokens = int(usage.get("output_tokens", 0) or usage.get("completion_tokens", 0) or 0)
+    if in_tokens or out_tokens:
+        return in_tokens, out_tokens
+
+    meta = getattr(response, "response_metadata", None) or {}
+    token_usage = meta.get("token_usage", {}) if isinstance(meta, dict) else {}
+    in_tokens = int(token_usage.get("input_tokens", 0) or token_usage.get("prompt_tokens", 0) or 0)
+    out_tokens = int(token_usage.get("output_tokens", 0) or token_usage.get("completion_tokens", 0) or 0)
+    return in_tokens, out_tokens
+
+
+def _get_model_name(model: Any) -> str:
+    return str(getattr(model, "model_name", None) or getattr(model, "model", "unknown"))
+
 
 async def intent_gate_node(state: AgentState) -> dict:
-    """
-    Phase 0: Intent Gate
-    의도를 분류하고 워크플로우를 결정한다.
-
-    chat_history를 AgentState.messages에서 추출해 분류 문맥으로 활용.
-    UNCLEAR / ask_clarification 워크플로우이면 final_answer에 명확화 메시지를 저장.
-    """
     from .intent_router import IntentRouter
 
-    # 이전 대화 이력을 분류 문맥으로 전달 (마지막 6개 메시지만 — 컨텍스트 절약)
     chat_history = list(state.get("messages", []))[-6:]
-
     router = IntentRouter()
     decision = await router.classify(state["user_request"], chat_history=chat_history)
 
     result: dict = {
         "intent": decision.intent,
         "recommended_workflow": decision.recommended_workflow,
-        "workflow_trace": state.get("workflow_trace", []) + ["intent_gate"],
+        "workflow_trace": ["intent_gate"],
         "messages": [
             AIMessage(
                 content=(
@@ -205,35 +224,23 @@ async def intent_gate_node(state: AgentState) -> dict:
             )
         ],
     }
-
-    # ask_clarification: 사용자에게 되물을 메시지를 final_answer로 저장
-    # finalizer_node는 final_answer가 이미 있으면 그대로 반환함
     if decision.recommended_workflow == "ask_clarification":
         result["final_answer"] = (
-            f"\U0001f914 요청을 좀 더 명확히 해주시겠어요?\n\n"
-            f"**판단 이유**: {decision.reasoning}\n\n"
-            f"예시:\n"
-            f"- 구체적으로 어떤 기능을 구현하고 싶으신가요?\n"
-            f"- 어떤 오류가 발생하고 있나요? (오류 메시지 포함)\n"
-            f"- 한 번에 하나씩 요청해 주시면 더 잘 도와드릴 수 있어요."
+            "요청을 좀 더 명확히 알려주세요.\n"
+            f"판단 이유: {decision.reasoning}"
         )
         result["loop_active"] = False
-
     return result
 
 
 async def planner_node(state: AgentState) -> dict:
-    """
-    Phase 1: Planner (Prometheus 역할)
-    구체적인 실행 계획을 수립한다.
-    """
     from langchain_anthropic import ChatAnthropic
     from langchain_core.prompts import ChatPromptTemplate
     import json
+    import re
 
     llm = ChatAnthropic(model="claude-opus-4-6")
-
-    PLANNER_PROMPT = """\
+    planner_prompt = """\
 You are a strategic planner. Create a detailed execution plan for this request.
 
 User request: {request}
@@ -258,15 +265,8 @@ Return ONLY valid JSON:
 Keep tasks atomic (one clear action each). Maximum 7 tasks.
 """
 
-    prompt = ChatPromptTemplate.from_template(PLANNER_PROMPT)
-    chain = prompt | llm
-
-    response = await chain.ainvoke({
-        "request": state["user_request"],
-        "intent": state["intent"],
-    })
-
-    import re
+    chain = ChatPromptTemplate.from_template(planner_prompt) | llm
+    response = await chain.ainvoke({"request": state["user_request"], "intent": state["intent"]})
     json_match = re.search(r"\{.*\}", response.content, re.DOTALL)
     plan_data = json.loads(json_match.group()) if json_match else {"tasks": [], "acceptance_criteria": []}
 
@@ -274,57 +274,62 @@ Keep tasks atomic (one clear action each). Maximum 7 tasks.
         "plan": plan_data.get("tasks", []),
         "acceptance_criteria": plan_data.get("acceptance_criteria", []),
         "current_task_index": 0,
-        "workflow_trace": state.get("workflow_trace", []) + ["planner"],
+        "workflow_trace": ["planner"],
         "messages": [AIMessage(content=f"Plan created: {len(plan_data.get('tasks', []))} tasks")],
     }
 
 
 async def executor_node(state: AgentState) -> dict:
-    """
-    Phase 2: Executor (Atlas 역할)
-    현재 태스크를 실행한다.
-    """
-    from langchain_anthropic import ChatAnthropic
     from .model_router import ModelRouter, TaskCategory
 
     plan = state.get("plan") or []
     current_index = state.get("current_task_index", 0)
+    cost_guard = CostGuard(
+        max_cost_usd=state.get("max_cost_usd", 1.0),
+        max_tokens=state.get("max_tokens", 500_000),
+        total_cost_usd=state.get("total_cost_usd", 0.0),
+        total_tokens=state.get("total_tokens", 0),
+    )
 
-    # 계획이 없는 경우 (direct 워크플로우)
+    # direct/research_only path
     if not plan:
         model = ModelRouter().get_model_for_intent(state["intent"])
         response = await model.ainvoke([HumanMessage(content=state["user_request"])])
+        in_tokens, out_tokens = _extract_token_usage(response)
+        cost_guard.record(_get_model_name(model), in_tokens, out_tokens)
+
         return {
             "final_answer": response.content,
             "loop_active": False,
-            "workflow_trace": state.get("workflow_trace", []) + ["executor"],
+            "total_cost_usd": cost_guard.total_cost_usd,
+            "total_tokens": cost_guard.total_tokens,
+            "workflow_trace": ["executor"],
             "messages": [AIMessage(content=response.content)],
         }
 
-    # 현재 태스크 실행
     if current_index >= len(plan):
         return {"loop_active": False}
 
     current_task = plan[current_index]
     agent_type = current_task.get("agent", "researcher")
-
-    # 에이전트 타입에 따라 카테고리 결정
     agent_to_category = {
         "researcher": TaskCategory.QUICK,
-        "coder":      TaskCategory.DEEP,
-        "writer":     TaskCategory.CREATIVE,
-        "analyst":    TaskCategory.ANALYSIS,
+        "coder": TaskCategory.DEEP,
+        "writer": TaskCategory.CREATIVE,
+        "analyst": TaskCategory.ANALYSIS,
     }
     category = agent_to_category.get(agent_type, TaskCategory.QUICK)
     model = ModelRouter().get_model(category)
 
-    task_prompt = f"""
-Task: {current_task['title']}
-Description: {current_task['description']}
-Success Criteria: {current_task['success_criteria']}
-Original Request Context: {state['user_request']}
-"""
+    task_prompt = (
+        f"Task: {current_task['title']}\n"
+        f"Description: {current_task['description']}\n"
+        f"Success Criteria: {current_task['success_criteria']}\n"
+        f"Original Request Context: {state['user_request']}"
+    )
     response = await model.ainvoke([HumanMessage(content=task_prompt)])
+    in_tokens, out_tokens = _extract_token_usage(response)
+    cost_guard.record(_get_model_name(model), in_tokens, out_tokens)
 
     task_result: TaskResult = {
         "task_id": current_task["id"],
@@ -333,33 +338,27 @@ Original Request Context: {state['user_request']}
         "status": "success",
         "error": None,
     }
-
     return {
-        "completed_tasks": state.get("completed_tasks", []) + [task_result],
+        "completed_tasks": [task_result],
         "current_task_index": current_index + 1,
         "consecutive_failures": 0,
         "loop_iteration": state.get("loop_iteration", 0) + 1,
-        "workflow_trace": state.get("workflow_trace", []) + [f"executor({agent_type})"],
+        "total_cost_usd": cost_guard.total_cost_usd,
+        "total_tokens": cost_guard.total_tokens,
+        "loop_active": not cost_guard.is_over_limit(),
+        "workflow_trace": [f"executor({agent_type})"],
         "messages": [AIMessage(content=f"Task '{current_task['title']}' completed.")],
     }
 
 
 async def reviewer_node(state: AgentState) -> dict:
-    """
-    Phase 3: Reviewer (Oracle 역할)
-    결과물을 검토하고 완성도를 평가한다.
-    """
     from langchain_openai import ChatOpenAI
 
-    # Oracle은 GPT 모델 사용 (oh-my-openagent 패턴)
     model = ChatOpenAI(model="gpt-4o")
-
     completed = state.get("completed_tasks", [])
-    results_summary = "\n".join([
-        f"- Task {r['task_id']} ({r['agent']}): {r['result'][:200]}..."
-        for r in completed
-    ])
-
+    results_summary = "\n".join(
+        [f"- Task {r['task_id']} ({r['agent']}): {r['result'][:200]}..." for r in completed]
+    )
     review_prompt = f"""
 You are a technical reviewer. Assess if the work is complete.
 
@@ -375,30 +374,21 @@ Answer:
 Be concise. Maximum 3 sentences.
 """
     response = await model.ainvoke([HumanMessage(content=review_prompt)])
-
     return {
-        "workflow_trace": state.get("workflow_trace", []) + ["reviewer"],
+        "workflow_trace": ["reviewer"],
         "messages": [AIMessage(content=response.content)],
     }
 
 
 async def finalizer_node(state: AgentState) -> dict:
-    """
-    최종 정리: 모든 결과를 종합해서 최종 답변 생성.
-    """
     from langchain_anthropic import ChatAnthropic
 
     if state.get("final_answer"):
         return {"loop_active": False}
 
     model = ChatAnthropic(model="claude-sonnet-4-6")
-
     completed = state.get("completed_tasks", [])
-    all_results = "\n\n".join([
-        f"### {r['task_id']}\n{r['result']}"
-        for r in completed
-    ])
-
+    all_results = "\n\n".join([f"### {r['task_id']}\n{r['result']}" for r in completed])
     synthesize_prompt = f"""
 Synthesize the following work into a clear, final answer.
 
@@ -410,67 +400,47 @@ Work completed:
 Provide a complete, well-structured final answer.
 """
     response = await model.ainvoke([HumanMessage(content=synthesize_prompt)])
-
     return {
         "final_answer": response.content,
         "loop_active": False,
-        "workflow_trace": state.get("workflow_trace", []) + ["finalizer"],
+        "workflow_trace": ["finalizer"],
         "messages": [AIMessage(content=response.content)],
     }
 
 
-# ─────────────────────────────────────────────
-# 4. 워크플로우 그래프 조립
-# ─────────────────────────────────────────────
-
-def build_orchestration_graph():
-    """
-    oh-my-openagent의 4-Phase 오케스트레이션을 LangGraph로 구현.
-
-    흐름:
-    intent_gate → [planner|executor] → executor → reviewer → loop_check → [executor|finalizer]
-    """
+def build_orchestration_graph(checkpointer: Any | None = None):
     graph = StateGraph(AgentState)
-
-    # 노드 등록
     graph.add_node("intent_gate", intent_gate_node)
-    graph.add_node("planner",     planner_node)
-    graph.add_node("executor",    executor_node)
-    graph.add_node("reviewer",    reviewer_node)
-    graph.add_node("loop_check",  lambda s: s)  # 상태만 통과
-    graph.add_node("finalizer",   finalizer_node)
+    graph.add_node("planner", planner_node)
+    graph.add_node("executor", executor_node)
+    graph.add_node("reviewer", reviewer_node)
+    graph.add_node("loop_check", lambda s: s)
+    graph.add_node("finalizer", finalizer_node)
 
-    # 진입점
     graph.set_entry_point("intent_gate")
-
-    # 조건부 엣지 (oh-my-openagent의 훅 기반 라우팅과 유사)
     graph.add_conditional_edges(
         "intent_gate",
         route_by_intent,
         {"planner": "planner", "executor": "executor", "finalizer": "finalizer"},
     )
-
     graph.add_edge("planner", "executor")
-
     graph.add_conditional_edges(
         "executor",
         check_execution_result,
         {"reviewer": "reviewer", "executor": "executor", "finalizer": "finalizer"},
     )
-
     graph.add_conditional_edges(
         "reviewer",
         check_review_result,
         {"loop_check": "loop_check", "executor": "executor", "planner": "planner"},
     )
-
-    # Ralph Loop 판단
     graph.add_conditional_edges(
         "loop_check",
         should_continue_loop,
         {"executor": "executor", "finalizer": "finalizer"},
     )
-
     graph.add_edge("finalizer", END)
 
+    if checkpointer is not None:
+        return graph.compile(checkpointer=checkpointer)
     return graph.compile()

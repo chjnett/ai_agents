@@ -3,6 +3,7 @@ Intent Router — My Agent System
 
 oh-my-openagent의 Intent Gate를 Python으로 구현.
 모든 요청은 반드시 이 분류기를 통과한다.
+제일 처음 거쳐가서 의도를 파악하는 코드
 
 개선 이력:
 - v1: regex JSON 파싱 방식
@@ -14,9 +15,30 @@ from enum import Enum
 from typing import Sequence
 
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field
+
+
+def _select_default_model() -> str:
+    """사용 가능한 API 키에 따라 기본 분류 모델을 자동 선택한다."""
+    import os
+    # ① OpenAI 우선 — 사용자가 토큰 충분하다고 명시, 분류는 항상 발생하므로 안정적인 키 사용
+    if os.getenv("OPENAI_API_KEY", "").startswith("sk-"):
+        return "gpt-4o-mini"    # 저렴 + 충분히 정확
+    # ② Anthropic — 잔액 있을 때만 (없으면 400 에러)
+    if os.getenv("ANTHROPIC_API_KEY", "").startswith("sk-ant"):
+        return "claude-haiku-4-5"
+    return "gpt-4o-mini"  # fallback
+
+
+def _create_llm(model_name: str) -> BaseChatModel:
+    """모델명으로 LLM 인스턴스를 생성한다."""
+    if "claude" in model_name.lower():
+        return ChatAnthropic(model=model_name, temperature=0)
+    return ChatOpenAI(model=model_name, temperature=0)
 
 
 # ─────────────────────────────────────────────
@@ -128,13 +150,16 @@ class IntentRouter:
     - 포괄적 에러 처리: API 실패도 안전하게 처리
     """
 
-    def __init__(self, model_name: str = "claude-haiku-4-5"):
-        # temperature=0: 분류는 창의성이 아닌 일관성이 필요
-        base_llm = ChatAnthropic(model=model_name, temperature=0)
-
-        # with_structured_output: LLM이 RoutingDecision 스키마를 직접 채워 반환
-        # regex로 JSON을 파싱하던 취약한 로직을 완전히 대체
-        self.chain = _CLASSIFICATION_PROMPT | base_llm.with_structured_output(RoutingDecision)
+    def __init__(self, model_name: str | None = None):
+        """
+        Args:
+            model_name: 사용할 모델명. None이면 환경 변수에서 자동 선택.
+                        ANTHROPIC_API_KEY 있으면 claude-haiku-4-5
+                        OPENAI_API_KEY 있으면 gpt-4o-mini
+        """
+        resolved = model_name or _select_default_model()
+        self.model_name = resolved
+        self.chain = _CLASSIFICATION_PROMPT | _create_llm(resolved).with_structured_output(RoutingDecision)
 
     async def classify(
         self,

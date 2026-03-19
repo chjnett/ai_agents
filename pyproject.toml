@@ -56,6 +56,13 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # LangChain이 내부적으로 Pydantic v1 호환 레이어를 사용 — Python 3.14 이슈 (써드파티)
+    "ignore::UserWarning:pydantic.*",
+    "ignore::UserWarning:langchain_core.*",
+    # google-genai 패키지의 Python 3.17 deprecation (써드파티)
+    "ignore::DeprecationWarning:google.*",
+]
 
 [tool.ruff]
 line-length = 100
