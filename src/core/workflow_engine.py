@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal, Sequence, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
-from .cost_guard import CostGuard
+from .cost_guard import CostGuard, CostLimitExceededError
 
 
 class TaskItem(TypedDict):
@@ -60,6 +60,7 @@ class AgentState(TypedDict):
     total_tokens: int
     max_cost_usd: float
     max_tokens: int
+    cost_by_model: dict[str, dict[str, float | int]]
 
     # retry state
     retry_count: int
@@ -106,6 +107,7 @@ def make_initial_state(
         "total_tokens": 0,
         "max_cost_usd": max_cost_usd,
         "max_tokens": max_tokens,
+        "cost_by_model": {},
         "retry_count": 0,
         "consecutive_failures": 0,
         "past_episodes": None,
@@ -289,20 +291,45 @@ async def executor_node(state: AgentState) -> dict:
         max_tokens=state.get("max_tokens", 500_000),
         total_cost_usd=state.get("total_cost_usd", 0.0),
         total_tokens=state.get("total_tokens", 0),
+        model_usage=state.get("cost_by_model", {}),
     )
 
     # direct/research_only path
     if not plan:
-        model = ModelRouter().get_model_for_intent(state["intent"])
+        router = ModelRouter()
+        intent_to_category = {
+            "research": TaskCategory.QUICK,
+            "implement": TaskCategory.DEEP,
+            "investigate": TaskCategory.ANALYSIS,
+            "evaluate": TaskCategory.ULTRABRAIN,
+            "fix": TaskCategory.DEEP,
+            "generate": TaskCategory.CREATIVE,
+        }
+        category = intent_to_category.get(state["intent"], TaskCategory.QUICK)
+        model = router.get_model_v2(category, state["user_request"])
         response = await model.ainvoke([HumanMessage(content=state["user_request"])])
         in_tokens, out_tokens = _extract_token_usage(response)
-        cost_guard.record(_get_model_name(model), in_tokens, out_tokens)
+        try:
+            cost_guard.record(_get_model_name(model), in_tokens, out_tokens)
+        except CostLimitExceededError:
+            summary = cost_guard.summary()
+            return {
+                "final_answer": response.content,
+                "loop_active": False,
+                "total_cost_usd": summary["total_cost_usd"],
+                "total_tokens": summary["total_tokens"],
+                "cost_by_model": summary["model_breakdown"],
+                "workflow_trace": ["executor"],
+                "messages": [AIMessage(content="Cost/token limit reached. Stopping execution.")],
+            }
 
+        summary = cost_guard.summary()
         return {
             "final_answer": response.content,
             "loop_active": False,
-            "total_cost_usd": cost_guard.total_cost_usd,
-            "total_tokens": cost_guard.total_tokens,
+            "total_cost_usd": summary["total_cost_usd"],
+            "total_tokens": summary["total_tokens"],
+            "cost_by_model": summary["model_breakdown"],
             "workflow_trace": ["executor"],
             "messages": [AIMessage(content=response.content)],
         }
@@ -319,7 +346,7 @@ async def executor_node(state: AgentState) -> dict:
         "analyst": TaskCategory.ANALYSIS,
     }
     category = agent_to_category.get(agent_type, TaskCategory.QUICK)
-    model = ModelRouter().get_model(category)
+    model = ModelRouter().get_model_v2(category, current_task.get("description", ""))
 
     task_prompt = (
         f"Task: {current_task['title']}\n"
@@ -329,8 +356,31 @@ async def executor_node(state: AgentState) -> dict:
     )
     response = await model.ainvoke([HumanMessage(content=task_prompt)])
     in_tokens, out_tokens = _extract_token_usage(response)
-    cost_guard.record(_get_model_name(model), in_tokens, out_tokens)
+    try:
+        cost_guard.record(_get_model_name(model), in_tokens, out_tokens)
+    except CostLimitExceededError as e:
+        summary = cost_guard.summary()
+        task_result: TaskResult = {
+            "task_id": current_task["id"],
+            "agent": agent_type,
+            "result": response.content,
+            "status": "success",
+            "error": None,
+        }
+        return {
+            "completed_tasks": [task_result],
+            "current_task_index": current_index + 1,
+            "consecutive_failures": 0,
+            "loop_iteration": state.get("loop_iteration", 0) + 1,
+            "total_cost_usd": summary["total_cost_usd"],
+            "total_tokens": summary["total_tokens"],
+            "cost_by_model": summary["model_breakdown"],
+            "loop_active": False,
+            "workflow_trace": [f"executor({agent_type})"],
+            "messages": [AIMessage(content=str(e))],
+        }
 
+    summary = cost_guard.summary()
     task_result: TaskResult = {
         "task_id": current_task["id"],
         "agent": agent_type,
@@ -343,9 +393,10 @@ async def executor_node(state: AgentState) -> dict:
         "current_task_index": current_index + 1,
         "consecutive_failures": 0,
         "loop_iteration": state.get("loop_iteration", 0) + 1,
-        "total_cost_usd": cost_guard.total_cost_usd,
-        "total_tokens": cost_guard.total_tokens,
-        "loop_active": not cost_guard.is_over_limit(),
+        "total_cost_usd": summary["total_cost_usd"],
+        "total_tokens": summary["total_tokens"],
+        "cost_by_model": summary["model_breakdown"],
+        "loop_active": not bool(summary["limit_exceeded"]),
         "workflow_trace": [f"executor({agent_type})"],
         "messages": [AIMessage(content=f"Task '{current_task['title']}' completed.")],
     }

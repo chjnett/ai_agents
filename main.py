@@ -108,6 +108,10 @@ async def run_interactive():
             print(f"Tokens: {final_state.get('total_tokens', 0)}")
             answer = final_state.get("final_answer", "No answer generated.")
             print(f"\nAgent > {answer}\n")
+        except asyncio.CancelledError:
+            print("\rCancelled.\n")
+        except KeyboardInterrupt:
+            print("\rCancelled.\n")
         except Exception as e:
             print(f"\rError: {e}\n")
 
@@ -147,9 +151,15 @@ def main():
     import sys
 
     if "--demo" in sys.argv:
-        asyncio.run(run_demo())
+        try:
+            asyncio.run(run_demo())
+        except KeyboardInterrupt:
+            print("\nBye!")
     else:
-        asyncio.run(run_interactive())
+        try:
+            asyncio.run(run_interactive())
+        except KeyboardInterrupt:
+            print("\nBye!")
 
 
 if __name__ == "__main__":

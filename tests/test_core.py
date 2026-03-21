@@ -199,6 +199,44 @@ class TestModelRouter:
             # then — Anthropic 키 있으면 CREATIVE는 claude
             assert "claude" in mapping[TaskCategory.CREATIVE]
 
+    class TestComplexityRouting:
+        def test_estimate_complexity_low_signal(self):
+            # given
+            from src.core.model_router import ComplexityLevel, estimate_complexity
+            # when
+            level = estimate_complexity("fix typo in one line comment")
+            # then
+            assert level == ComplexityLevel.LOW
+
+        def test_estimate_complexity_high_signal(self):
+            # given
+            from src.core.model_router import ComplexityLevel, estimate_complexity
+            # when
+            level = estimate_complexity("전체 아키텍처 리팩토링 설계")
+            # then
+            assert level == ComplexityLevel.HIGH
+
+        def test_get_model_name_v2_returns_valid_name(self):
+            # given
+            from src.core.model_router import ModelRouter, TaskCategory
+            router = ModelRouter()
+            # when
+            name = router.get_model_name_v2(TaskCategory.DEEP, "simple one line fix")
+            # then
+            assert isinstance(name, str)
+            assert len(name) > 0
+
+        def test_get_model_name_v2_changes_with_complexity(self):
+            # given
+            from src.core.model_router import ModelRouter, TaskCategory
+            router = ModelRouter()
+            # when
+            low_name = router.get_model_name_v2(TaskCategory.QUICK, "one line typo fix")
+            high_name = router.get_model_name_v2(TaskCategory.QUICK, "system architecture design")
+            # then
+            assert low_name != ""
+            assert high_name != ""
+
 
 class TestLoopLogic:
     """Ralph Loop 로직 단위 테스트"""
@@ -324,6 +362,7 @@ class TestInitialStateFactory:
         assert state["total_tokens"] == 0
         assert state["max_cost_usd"] == 1.0
         assert state["max_tokens"] == 500000
+        assert state["cost_by_model"] == {}
 
 
 class TestRouteByIntent:

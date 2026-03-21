@@ -1,6 +1,7 @@
 # My Agent System v2 — 고도화 아키텍처 가이드
 
 > **작성일**: 2026-03-18  
+> **업데이트**: 2026-03-19 (PHASE 1 구현 반영)  
 > **버전**: 0.2 (고도화)  
 > **배경**: 기술 검토 피드백 6가지를 반영한 업그레이드 설계
 
@@ -8,19 +9,48 @@
 
 ## 목차
 
-1. [v1 → v2 변경 요약](#1-v1--v2-변경-요약)
-2. [Dynamic Tool Discovery](#2-dynamic-tool-discovery)
-3. [Human-in-the-Loop (HITL)](#3-human-in-the-loop-hitl)
-4. [Model Routing 고도화](#4-model-routing-고도화)
-5. [병렬 실행 설계](#5-병렬-실행-설계)
-6. [Observability — LangFuse 통합](#6-observability--langfuse-통합)
-7. [Episodic Memory 설계](#7-episodic-memory-설계)
-8. [업그레이드된 AgentState](#8-업그레이드된-agentstate)
-9. [구현 우선순위 체크리스트](#9-구현-우선순위-체크리스트)
+1. [현재 구현 상태 (2026-03-19)](#1-현재-구현-상태-2026-03-19)
+2. [v1 → v2 변경 요약](#2-v1--v2-변경-요약)
+3. [Dynamic Tool Discovery](#3-dynamic-tool-discovery)
+4. [Human-in-the-Loop (HITL)](#4-human-in-the-loop-hitl)
+5. [Model Routing 고도화](#5-model-routing-고도화)
+6. [병렬 실행 설계](#6-병렬-실행-설계)
+7. [Observability — LangFuse 통합](#7-observability--langfuse-통합)
+8. [Episodic Memory 설계](#8-episodic-memory-설계)
+9. [업그레이드된 AgentState](#9-업그레이드된-agentstate)
+10. [구현 우선순위 체크리스트](#10-구현-우선순위-체크리스트)
 
 ---
 
-## 1. v1 → v2 변경 요약
+## 1. 현재 구현 상태 (2026-03-19)
+
+### 완료된 PHASE 1 항목
+
+- `src/core/cost_guard.py` 구현 완료
+  - `PRICE_PER_1K`, `record()`, `is_over_limit()`, `summary()`
+- `src/core/workflow_engine.py`에 `AgentState v2` 필드 반영
+  - `total_cost_usd`, `total_tokens`, `max_cost_usd`, `max_tokens`
+  - `user_id`, `task_complexity`, `parallel_groups`, `require_approval`
+  - `past_episodes`, `user_preferences`
+  - `completed_tasks`, `failed_tasks`, `workflow_trace`를 `Annotated[..., operator.add]` 적용
+- 루프 안전장치 반영
+  - `should_continue_loop()`와 `check_execution_result()`에 비용/토큰 하드캡 조건 추가
+- 실행 중 비용 누적 반영
+  - `executor_node()`에서 모델 호출 후 토큰 사용량 추출 및 `CostGuard.record()` 적용
+- 체크포인터 연동 구조 반영
+  - `build_orchestration_graph(checkpointer=None)` 지원
+  - `main.py`에서 `thread_id=session_id`, `Command(resume=...)` 재개 흐름 반영
+  - 로컬 환경에서 sqlite checkpointer 모듈 부재 시 non-persistent fallback 제공
+
+### 현재 테스트 상태
+
+- 전체 테스트: **27 passed / 0 failed**
+- `tests/test_cost_guard.py` 추가 완료
+- `tests/test_core.py`에 비용/토큰 루프 가드 및 초기 상태 팩토리 테스트 추가
+
+---
+
+## 2. v1 → v2 변경 요약
 
 | 항목        | v1 (기존)            | v2 (개선)                            |
 | ----------- | -------------------- | ------------------------------------ |
@@ -778,13 +808,13 @@ class AgentState(TypedDict):
 
 ---
 
-## 9. 구현 우선순위 체크리스트
+## 10. 구현 우선순위 체크리스트
 
 ### 필수 (Blocker — 이게 없으면 프로덕션 불가)
 
-- [ ] **비용 하드캡** `CostGuard` 구현 및 `AgentState`에 통합
-- [ ] **Ralph Loop 안전장치** `max_loop_iterations` + `max_cost_usd` 이중 가드
-- [ ] **LangGraph Checkpointer** (SQLite) — 세션 재개 + HITL 필수
+- [x] **비용 하드캡** `CostGuard` 구현 및 `AgentState`에 통합
+- [x] **Ralph Loop 안전장치** `max_loop_iterations` + `max_cost_usd` 이중 가드
+- [x] **LangGraph Checkpointer 연동 구조** (SQLite) — 세션 재개 흐름/스레드 ID 반영
 - [ ] **HITL Breakpoint** — Planner 직후 사용자 승인 노드
 
 ### 권장 (Core Feature — 시스템 품질을 결정)
@@ -810,4 +840,4 @@ class AgentState(TypedDict):
 
 ---
 
-*마지막 업데이트: 2026-03-18*
+*마지막 업데이트: 2026-03-19*

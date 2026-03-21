@@ -5,6 +5,9 @@
 > **기반**: oh-my-openagent 아키텍처 학습 → Python + LangGraph로 독립 구현
 
 > ⚡ **v2 고도화 문서 출시**: 기술 검토 피드백(Dynamic Tool Discovery, HITL, Model Routing 고도화, 병렬 실행, LangFuse, Episodic Memory)이 반영된 업그레이드 설계가 [`docs/ARCHITECTURE_V2.md`](./docs/ARCHITECTURE_V2.md)에 있습니다.
+>
+> ✅ **현재 구현 상태 반영 기준일**: 2026-03-19  
+> PHASE 1(CostGuard, AgentState v2, Checkpointer 연동 구조)은 `ARCHITECTURE_V2.md`를 기준으로 확인하세요.
 
 ---
 

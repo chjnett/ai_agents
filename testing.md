@@ -1,20 +1,27 @@
 # Testing Quick Guide
 
-직접 테스트할 때 아래 3개만 실행하면 됩니다.
+현재 구현 상태를 빠르게 검증할 때는 아래 순서만 따라가면 됩니다.
 
-## 1) 단위 테스트 (가장 먼저)
+## 1) 전체 단위 테스트
 ```bash
 cd /Users/cheonhyeonjun/workspace/06ai_aiagents/my-agent-system
 .venv/bin/python3 -m pytest -v
 ```
 
-## 2) 수동 테스트 (실제 LLM 호출)
+## 2) 핵심 모듈만 빠르게 확인
 ```bash
 cd /Users/cheonhyeonjun/workspace/06ai_aiagents/my-agent-system
-.venv/bin/python3 test_manual.pypip install -U google-generativeai
+.venv/bin/python3 -m pytest tests/test_core.py -v
+.venv/bin/python3 -m pytest tests/test_cost_guard.py -v
 ```
 
-## 3) 전체 워크플로우 E2E
+## 3) 수동 테스트 (실제 LLM 호출)
+```bash
+cd /Users/cheonhyeonjun/workspace/06ai_aiagents/my-agent-system
+.venv/bin/python3 test_manual.py
+```
+
+## 4) 전체 워크플로우 E2E
 ```bash
 cd /Users/cheonhyeonjun/workspace/06ai_aiagents/my-agent-system
 .venv/bin/python3 test_manual.py --workflow
@@ -27,4 +34,7 @@ cd /Users/cheonhyeonjun/workspace/06ai_aiagents/my-agent-system
 
 # 첫 실패에서 중단
 .venv/bin/python3 -m pytest -x
+
+# 간결 출력
+.venv/bin/python3 -m pytest -q
 ```
