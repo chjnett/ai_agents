@@ -56,6 +56,7 @@ class AgentState(TypedDict):
     max_loop_iterations: int
 
     # cost/token guard
+    orchestration_mode: str  # economy, balanced, powerful
     total_cost_usd: float
     total_tokens: int
     max_cost_usd: float
@@ -84,6 +85,7 @@ def make_initial_state(
     user_id: str | None = None,
     max_cost_usd: float = 1.0,
     max_tokens: int = 500_000,
+    orchestration_mode: str = "balanced",
 ) -> AgentState:
     return {
         "messages": [],
@@ -107,6 +109,7 @@ def make_initial_state(
         "total_tokens": 0,
         "max_cost_usd": max_cost_usd,
         "max_tokens": max_tokens,
+        "orchestration_mode": orchestration_mode,
         "cost_by_model": {},
         "retry_count": 0,
         "consecutive_failures": 0,
@@ -306,7 +309,8 @@ async def executor_node(state: AgentState) -> dict:
             "generate": TaskCategory.CREATIVE,
         }
         category = intent_to_category.get(state["intent"], TaskCategory.QUICK)
-        model = router.get_model_v2(category, state["user_request"])
+        mode = state.get("orchestration_mode", "balanced")
+        model = router.get_model_v2(category, state["user_request"], mode=mode)
         response = await model.ainvoke([HumanMessage(content=state["user_request"])])
         in_tokens, out_tokens = _extract_token_usage(response)
         try:
@@ -346,7 +350,8 @@ async def executor_node(state: AgentState) -> dict:
         "analyst": TaskCategory.ANALYSIS,
     }
     category = agent_to_category.get(agent_type, TaskCategory.QUICK)
-    model = ModelRouter().get_model_v2(category, current_task.get("description", ""))
+    mode = state.get("orchestration_mode", "balanced")
+    model = ModelRouter().get_model_v2(category, current_task.get("description", ""), mode=mode)
 
     task_prompt = (
         f"Task: {current_task['title']}\n"

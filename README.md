@@ -22,9 +22,30 @@ cp .env.example .env
 
 # 3) 실행
 poetry run python main.py
-# 또는 데모
+
+# 4) 옵션: 오케스트레이션 모드 설정 (기본값: balanced)
+# - economy: 비용 절약형 (더 낮은 사양 모델 우선)
+# - balanced: 균형 잡힌 모델 선택
+# - powerful: 성능 중심 (고성능 모델 우선)
+poetry run python main.py --mode economy
+
+# 5) 데모 실행
 poetry run python main.py --demo
 ```
+
+## 주요 기능 (v0.2+)
+
+### 1. 오케스트레이션 모드 (`--mode`)
+시스템이 태스크의 복잡도를 분석한 후, 사용자가 선택한 모드에 따라 모델을 유동적으로 할당합니다.
+- `ECONOMY`: 추정된 난이도보다 한 단계 낮은 성능의 모델을 사용하여 비용을 아낍니다.
+- `BALANCED`: 최적의 성능/비용 가성비 모델을 선택합니다.
+- `POWERFUL`: 비용보다는 성능과 정확도가 높은 모델을 우선적으로 할당합니다.
+
+### 2. 인터랙티브 모델 확인 (Interactive Confirmation)
+태스크 실행 전, 시스템이 판단한 의도(Intent)와 할당된 모델명을 사용자에게 보여주고 확인을 받습니다.
+- `Y`: 승인 후 실행
+- `n`: 중단
+- `change`: 해당 카테고리 내의 다른 모델(LOW/MEDIUM/HIGH) 리스트를 보고 직접 모델 선택 가능
 
 ## 테스트
 

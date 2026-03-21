@@ -27,6 +27,12 @@ class ComplexityLevel(str, Enum):
     HIGH = "high"
 
 
+class OrchestrationMode(str, Enum):
+    ECONOMY = "economy"
+    BALANCED = "balanced"
+    POWERFUL = "powerful"
+
+
 def _has_openai() -> bool:
     return os.getenv("OPENAI_API_KEY", "").strip().startswith("sk-")
 
@@ -156,13 +162,42 @@ class ModelRouter:
         return self.get_model(intent_to_category.get(intent, TaskCategory.QUICK))
 
     # v2 API
-    def get_model_name_v2(self, category: TaskCategory, task_description: str) -> str:
-        complexity = estimate_complexity(task_description)
-        matrix = self._build_model_matrix()
-        return matrix.get((category, complexity), self.mapping.get(category, "gpt-4o-mini"))
+    def get_orchestrated_model(
+        self,
+        category: TaskCategory,
+        task_description: str,
+        mode: OrchestrationMode = OrchestrationMode.BALANCED,
+    ) -> str:
+        """복잡도 추정 후 모드(Economy/Balanced/Powerful)를 적용해 최종 모델명을 결정한다."""
+        base_complexity = estimate_complexity(task_description)
+        adjusted_complexity = base_complexity
 
-    def get_model_v2(self, category: TaskCategory, task_description: str) -> BaseChatModel:
-        return self._create_model(self.get_model_name_v2(category, task_description))
+        if mode == OrchestrationMode.ECONOMY:
+            if base_complexity == ComplexityLevel.MEDIUM:
+                adjusted_complexity = ComplexityLevel.LOW
+            elif base_complexity == ComplexityLevel.HIGH:
+                adjusted_complexity = ComplexityLevel.MEDIUM
+        elif mode == OrchestrationMode.POWERFUL:
+            if base_complexity == ComplexityLevel.LOW:
+                adjusted_complexity = ComplexityLevel.MEDIUM
+            elif base_complexity == ComplexityLevel.MEDIUM:
+                adjusted_complexity = ComplexityLevel.HIGH
+
+        matrix = self._build_model_matrix()
+        return matrix.get((category, adjusted_complexity), self.mapping.get(category, "gpt-4o-mini"))
+
+    def get_model_name_v2(self, category: TaskCategory, task_description: str) -> str:
+        """기존 호환성 유지용"""
+        return self.get_orchestrated_model(category, task_description, mode=OrchestrationMode.BALANCED)
+
+    def get_model_v2(
+        self,
+        category: TaskCategory,
+        task_description: str,
+        mode: OrchestrationMode = OrchestrationMode.BALANCED,
+    ) -> BaseChatModel:
+        model_name = self.get_orchestrated_model(category, task_description, mode)
+        return self._create_model(model_name)
 
     def _build_model_matrix(self) -> dict[tuple[TaskCategory, ComplexityLevel], str]:
         """현재 키/예산 상태를 반영한 카테고리 x 복잡도 매트릭스."""
